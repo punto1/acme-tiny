@@ -1,5 +1,22 @@
 #!/usr/bin/env python
-import argparse, subprocess, json, os, sys, base64, binascii, time, hashlib, re, copy, textwrap, logging
+import argparse
+import subprocess
+import json
+import os
+import sys
+import base64
+import binascii
+import time
+from hashlib import sha256
+import re
+import copy
+import textwrap
+import logging
+import ssl
+
+## original repo:
+## https://github.com/diafygi/acme-tiny/
+
 try:
     from urllib.request import urlopen # Python 3
 except ImportError:
@@ -11,6 +28,8 @@ DEFAULT_CA = "https://acme-v01.api.letsencrypt.org"
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.StreamHandler())
 LOGGER.setLevel(logging.INFO)
+
+CONTEXT = ssl._create_unverified_context() # circumvent 'SSL: CERTIFICATE_VERIFY_FAILED' issue
 
 def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA):
     # helper function base64 encode for jose spec
@@ -38,13 +57,13 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA):
         },
     }
     accountkey_json = json.dumps(header['jwk'], sort_keys=True, separators=(',', ':'))
-    thumbprint = _b64(hashlib.sha256(accountkey_json.encode('utf8')).digest())
+    thumbprint = _b64(sha256(accountkey_json.encode('utf8')).digest())
 
     # helper function make signed requests
     def _send_signed_request(url, payload):
         payload64 = _b64(json.dumps(payload).encode('utf8'))
         protected = copy.deepcopy(header)
-        protected["nonce"] = urlopen(CA + "/directory").headers['Replay-Nonce']
+        protected["nonce"] = urlopen(CA + "/directory", context=CONTEXT).headers['Replay-Nonce']
         protected64 = _b64(json.dumps(protected).encode('utf8'))
         proc = subprocess.Popen(["openssl", "dgst", "-sha256", "-sign", account_key],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -56,7 +75,7 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA):
             "payload": payload64, "signature": _b64(out),
         })
         try:
-            resp = urlopen(url, data.encode('utf8'))
+            resp = urlopen(url, data.encode('utf8'), context=CONTEXT)
             return resp.getcode(), resp.read()
         except IOError as e:
             return getattr(e, "code", None), getattr(e, "read", e.__str__)()
@@ -114,7 +133,7 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA):
         # check that the file is in place
         wellknown_url = "http://{0}/.well-known/acme-challenge/{1}".format(domain, token)
         try:
-            resp = urlopen(wellknown_url)
+            resp = urlopen(wellknown_url, context=CONTEXT)
             resp_data = resp.read().decode('utf8').strip()
             assert resp_data == keyauthorization
         except (IOError, AssertionError):
@@ -133,7 +152,7 @@ def get_crt(account_key, csr, acme_dir, log=LOGGER, CA=DEFAULT_CA):
         # wait for challenge to be verified
         while True:
             try:
-                resp = urlopen(challenge['uri'])
+                resp = urlopen(challenge['uri'], context=CONTEXT)
                 challenge_status = json.loads(resp.read().decode('utf8'))
             except IOError as e:
                 raise ValueError("Error checking challenge: {0} {1}".format(
